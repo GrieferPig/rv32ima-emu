@@ -1,0 +1,7 @@
+build/
+buildroot_setup/buildroot
+build.log
+buildroot.tar.gz
+emulator
+fimrware.bin
+rv32ima.dtb

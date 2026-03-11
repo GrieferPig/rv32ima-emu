@@ -1,0 +1,79 @@
+/dts-v1/;
+
+/ {
+    #address-cells = <1>;
+    #size-cells = <1>;
+    compatible = "rv32ima";
+    model = "rv32ima";
+
+    chosen {
+        stdout-path = &uart0;
+    };
+
+    memory@80000000 {
+        device_type = "memory";
+        reg = <0x80000000 0x4000000>; // 64MB of memory
+    };
+
+    cpus {
+        #address-cells = <1>;
+        #size-cells = <0>;
+        timebase-frequency = <1000000>; // 1 MHz for timer
+
+        cpu0: cpu@0 {
+            device_type = "cpu";
+            compatible = "riscv";
+            riscv,isa = "rv32ima";
+            status = "okay";
+            mmu-type = "riscv,none";
+            reg = <0>;
+
+            cpu_intc: interrupt-controller {
+                #interrupt-cells = <1>;
+                interrupt-controller;
+                compatible = "riscv,cpu-intc";
+            };
+        };
+
+        cpu-map {
+            cluster0 {
+                core0 {
+                    cpu = <&cpu0>;
+                };
+            };
+        };
+    };
+
+    soc {
+        #address-cells = <1>;
+        #size-cells = <1>;
+        compatible = "simple-bus";
+        ranges;
+
+        plic0: interrupt-controller@c000000 {
+            compatible = "sifive,plic-1.0.0", "riscv,plic0";
+            reg = <0x0c000000 0x4000000>;
+            #interrupt-cells = <1>;
+            interrupt-controller;
+            riscv,ndev = <1>;
+            interrupts-extended = <&cpu_intc 11>;
+        };
+
+        uart0: uart@10000000 {
+            clock-frequency = <0x1000000>;
+            reg = <0x10000000 0x100>;
+            compatible = "ns16850", "ns16550a";
+            reg-shift = <0>;
+            reg-io-width = <1>;
+            current-speed = <115200>;
+            interrupt-parent = <&plic0>;
+            interrupts = <1>;
+        };
+
+        clint@2000000 {
+            compatible = "riscv,clint0";
+            reg = <0x02000000 0x10000>;
+            interrupts-extended = <&cpu_intc 3>, <&cpu_intc 7>;
+        };
+    };
+};

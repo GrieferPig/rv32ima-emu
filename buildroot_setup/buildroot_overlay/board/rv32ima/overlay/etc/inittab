@@ -1,0 +1,4 @@
+# /etc/inittab
+::sysinit:/bin/mount -a
+console::respawn:/bin/sh
+::shutdown:/bin/umount -a -r

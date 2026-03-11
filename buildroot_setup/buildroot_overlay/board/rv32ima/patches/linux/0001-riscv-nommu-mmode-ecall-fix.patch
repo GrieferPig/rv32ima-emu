@@ -1,0 +1,42 @@
+--- a/arch/riscv/kernel/entry.S
++++ b/arch/riscv/kernel/entry.S
+@@ -25,7 +25,11 @@
+ 	 * register will contain 0, and we should continue on the current TP.
+ 	 */
+ 	csrrw tp, CSR_SCRATCH, tp
++#if defined(CONFIG_RISCV_M_MODE) && !defined(CONFIG_MMU)
++	bnez tp, _save_context_user
++#else
+ 	bnez tp, _save_context
++#endif
+ 
+ _restore_kernel_tpsp:
+ 	csrr tp, CSR_SCRATCH
+@@ -39,6 +43,15 @@
+ 	REG_L sp, TASK_TI_KERNEL_SP(tp)
+ #endif
+ 
++#if defined(CONFIG_RISCV_M_MODE) && !defined(CONFIG_MMU)
++	j _save_context
++
++_save_context_user:
++	/* Clear MPP bits so user_mode(regs) correctly identifies user traps */
++	li t0, SR_MPP
++	csrc CSR_STATUS, t0
++#endif
++
+ _save_context:
+ 	REG_S sp, TASK_TI_USER_SP(tp)
+ 	REG_L sp, TASK_TI_KERNEL_SP(tp)
+@@ -291,7 +304,11 @@
+ 	RISCV_PTR do_trap_ecall_u /* system call */
+ 	RISCV_PTR do_trap_ecall_s
+ 	RISCV_PTR do_trap_unknown
++#if defined(CONFIG_RISCV_M_MODE) && !defined(CONFIG_MMU)
++	RISCV_PTR do_trap_ecall_u /* M-mode ecall = syscall on NOMMU */
++#else
+ 	RISCV_PTR do_trap_ecall_m
++#endif
+ 	/* instruciton page fault */
+ 	ALT_PAGE_FAULT(RISCV_PTR do_page_fault)
+ 	RISCV_PTR do_page_fault   /* load page fault */
