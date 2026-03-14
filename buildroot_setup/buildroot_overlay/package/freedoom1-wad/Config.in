@@ -1,0 +1,4 @@
+config BR2_PACKAGE_FREEDOOM1_WAD
+	bool "freedoom1.wad"
+	help
+	  Install Freedoom Phase 1 IWAD as /freedoom1.wad in the target rootfs.

@@ -1,12 +1,15 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <termios.h>
 #include <unistd.h>
+
+#include "MiniFB.h"
 
 #define CSR_MTVEC 0x305
 #define CSR_MEPC 0x341
@@ -33,9 +36,17 @@
 #define MISA_VALUE ((1u << 30) | (1 << 12) | (1 << 8) | (1 << 0))
 
 #define RAM_BASE 0x80000000u
-#define RAM_SIZE (64u * 1024u * 1024u)
-#define FDT_OFFSET (8u * 1024u * 1024u)
+#define RAM_SIZE (128u * 1024u * 1024u)
+#define FDT_OFFSET (16u * 1024u * 1024u)
 #define FDT_ADDR (RAM_BASE + FDT_OFFSET)
+#define FB_WIDTH 640u
+#define FB_HEIGHT 480u
+#define FB_BYTES_PER_PIXEL 4u
+#define FB_STRIDE (FB_WIDTH * FB_BYTES_PER_PIXEL)
+#define FB_SIZE (FB_STRIDE * FB_HEIGHT)
+#define FB_RESERVE_SIZE (2u * 1024u * 1024u)
+#define FB_ADDR (RAM_BASE + RAM_SIZE - FB_RESERVE_SIZE)
+#define FB_REFRESH_INSTRUCTIONS 16384u
 #define UART_BASE 0x10000000u
 #define UART_SIZE 0x100u
 
@@ -131,6 +142,15 @@ typedef struct
     uint8_t claim_write_mask;
 } PLICState;
 
+typedef struct
+{
+    struct mfb_window *window;
+    uint32_t *host_pixels;
+    uint8_t *guest_pixels;
+    uint32_t dirty;
+    int available;
+} FramebufferState;
+
 typedef uint8_t (*MemoryRead8Fn)(uint32_t addr);
 typedef void (*MemoryWrite8Fn)(uint32_t addr, uint8_t value);
 
@@ -144,6 +164,7 @@ CpuState cpu = {0};
 CLINTState clint = {0};
 UARTState uart = {.lsr = UART_LSR_THRE | UART_LSR_TEMT};
 PLICState plic = {.priority = {0, 1}};
+FramebufferState framebuffer = {0};
 
 static struct termios stdin_termios;
 static int stdin_is_tty = 0;
@@ -151,6 +172,9 @@ static int stdin_flags = -1;
 
 static void uart_restore_stdio(void);
 static void uart_update_irq(void);
+static int framebuffer_init(void);
+static void framebuffer_shutdown(void);
+static int framebuffer_poll(void);
 
 static void uart_signal_handler(int signo)
 {
@@ -419,6 +443,11 @@ OpcodeType opcode_get_format(uint32_t opcode)
 
 uint8_t *memory;
 
+static inline int framebuffer_addr_contains(uint32_t addr)
+{
+    return addr >= FB_ADDR && addr < FB_ADDR + FB_SIZE;
+}
+
 static inline uint32_t memory_offset(uint32_t addr)
 {
     if (addr < RAM_BASE || addr >= RAM_BASE + RAM_SIZE)
@@ -438,6 +467,92 @@ static inline uint8_t ram_read8(uint32_t addr)
 static inline void ram_write8(uint32_t addr, uint8_t value)
 {
     memory[memory_offset(addr)] = value;
+
+    if (framebuffer.available && framebuffer_addr_contains(addr))
+        framebuffer.dirty = 1;
+}
+
+static void framebuffer_present(void)
+{
+    const uint32_t *guest_pixels = (const uint32_t *)framebuffer.guest_pixels;
+    const size_t pixel_count = (size_t)FB_WIDTH * FB_HEIGHT;
+
+    for (size_t i = 0; i < pixel_count; i++)
+        framebuffer.host_pixels[i] = guest_pixels[i] | 0xff000000u;
+}
+
+static int framebuffer_init(void)
+{
+    if (FB_SIZE > FB_RESERVE_SIZE)
+    {
+        fprintf(stderr, "framebuffer reservation is too small\n");
+        return -1;
+    }
+
+    framebuffer.host_pixels = calloc((size_t)FB_WIDTH * FB_HEIGHT, sizeof(*framebuffer.host_pixels));
+    if (framebuffer.host_pixels == NULL)
+    {
+        perror("failed to allocate host framebuffer");
+        return -1;
+    }
+
+    framebuffer.guest_pixels = memory + memory_offset(FB_ADDR);
+    framebuffer.window = mfb_open_ex("rv32ima framebuffer", FB_WIDTH, FB_HEIGHT, WF_RESIZABLE);
+    if (framebuffer.window == NULL)
+    {
+        fprintf(stderr, "warning: failed to open MiniFB window, continuing headless\n");
+        free(framebuffer.host_pixels);
+        framebuffer.host_pixels = NULL;
+        framebuffer.guest_pixels = NULL;
+        return 0;
+    }
+
+    mfb_set_target_fps(60);
+    framebuffer.available = 1;
+    framebuffer.dirty = 1;
+    return 0;
+}
+
+static void framebuffer_shutdown(void)
+{
+    if (framebuffer.window != NULL)
+    {
+        mfb_close(framebuffer.window);
+        framebuffer.window = NULL;
+    }
+
+    free(framebuffer.host_pixels);
+    framebuffer.host_pixels = NULL;
+    framebuffer.guest_pixels = NULL;
+    framebuffer.available = 0;
+    framebuffer.dirty = 0;
+}
+
+static int framebuffer_poll(void)
+{
+    mfb_update_state state;
+
+    if (!framebuffer.available)
+        return 0;
+
+    if (framebuffer.dirty)
+    {
+        framebuffer_present();
+        state = mfb_update_ex(framebuffer.window, framebuffer.host_pixels, FB_WIDTH, FB_HEIGHT);
+        framebuffer.dirty = 0;
+    }
+    else
+    {
+        state = mfb_update_events(framebuffer.window);
+    }
+
+    if (state != STATE_OK)
+    {
+        fprintf(stderr, "framebuffer window closed\n");
+        return -1;
+    }
+
+    return 0;
 }
 
 static inline uint8_t uart_read8(uint32_t addr)
@@ -1035,11 +1150,10 @@ void handleITypeInst(CpuState *cpu, uint32_t instr, uint32_t opcode)
         case 0x1: // slli
             cpu->regs[rd] = cpu->regs[rs1] << (imm & 0x1f);
             break;
-        case 0x2: // slti (Set Less Than Immediate, Signed)
+        case 0x2: // slti
             cpu->regs[rd] = ((int32_t)cpu->regs[rs1] < imm) ? 1 : 0;
             break;
-        case 0x3: // sltiu (Set Less Than Immediate, Unsigned)
-            // Must cast the sign-extended imm back to unsigned for the comparison!
+        case 0x3: // sltiu
             cpu->regs[rd] = (cpu->regs[rs1] < (uint32_t)imm) ? 1 : 0;
             break;
         case 0x4: // xori
@@ -1356,6 +1470,7 @@ int main(int argc, char **argv)
 
     uint32_t instr = 0;
     uint32_t tohost_addr = 0;
+    uint32_t framebuffer_tick = 0;
     const char *bin_path = NULL;
 
     for (int i = 1; i < argc; i++)
@@ -1395,11 +1510,25 @@ int main(int argc, char **argv)
     cpu.csr[CSR_MISA] = MISA_VALUE;
     cpu.csr[CSR_MHARTID] = 0;
 
+    if (framebuffer_init() != 0)
+    {
+        free(memory);
+        return 1;
+    }
+
+    if (framebuffer_poll() != 0)
+    {
+        framebuffer_shutdown();
+        free(memory);
+        return 0;
+    }
+
     while (1)
     {
         if (cpu.pc < RAM_BASE || cpu.pc >= RAM_BASE + RAM_SIZE)
         {
             fprintf(stderr, "PC out of range: 0x%08x\n", cpu.pc);
+            framebuffer_shutdown();
             free(memory);
             return 1;
         }
@@ -1436,6 +1565,7 @@ int main(int argc, char **argv)
 
         default:
             fprintf(stderr, "Illegal instr at PC 0x%08x: 0x%08x\n", cpu.pc, instr);
+            framebuffer_shutdown();
             free(memory);
             return 1;
         }
@@ -1448,6 +1578,7 @@ int main(int argc, char **argv)
             uint32_t val = memory_read32(tohost_addr);
             if (val != 0)
             {
+                framebuffer_shutdown();
                 free(memory);
                 return (val == 1) ? 0 : 1;
             }
@@ -1455,5 +1586,17 @@ int main(int argc, char **argv)
 
         uart_poll_input();
         machine_update_irqs();
+
+        framebuffer_tick++;
+        if (framebuffer_tick >= FB_REFRESH_INSTRUCTIONS)
+        {
+            framebuffer_tick = 0;
+            if (framebuffer_poll() != 0)
+                break;
+        }
     }
+
+    framebuffer_shutdown();
+    free(memory);
+    return 0;
 }

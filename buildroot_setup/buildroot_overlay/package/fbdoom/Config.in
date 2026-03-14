@@ -1,0 +1,6 @@
+config BR2_PACKAGE_FBDOOM
+	bool "fbdoom"
+	help
+	  Framebuffer-oriented Doom port built from maximevince/fbDOOM.
+
+	  The binary is installed as /fbdoom in the target rootfs.

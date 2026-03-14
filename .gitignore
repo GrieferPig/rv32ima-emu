@@ -1,7 +1,8 @@
 build/
 buildroot_setup/buildroot
 build.log
-buildroot.tar.gz
+buildroot-2025.02.tar.gz
 emulator
 fimrware.bin
 rv32ima.dtb
+third_party

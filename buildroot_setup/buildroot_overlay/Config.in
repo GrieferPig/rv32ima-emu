@@ -1,0 +1,2 @@
+source "$BR2_EXTERNAL_rv32ima_overlay_PATH/package/fbdoom/Config.in"
+source "$BR2_EXTERNAL_rv32ima_overlay_PATH/package/freedoom1-wad/Config.in"

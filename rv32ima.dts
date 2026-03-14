@@ -6,13 +6,27 @@
     compatible = "rv32ima";
     model = "rv32ima";
 
+    aliases {
+        display0 = &framebuffer0;
+    };
+
     chosen {
         stdout-path = &uart0;
     };
 
+    reserved-memory {
+        #address-cells = <1>;
+        #size-cells = <1>;
+        ranges;
+
+        framebuffer_reserved: framebuffer@87e00000 {
+            reg = <0x87e00000 0x200000>;
+        };
+    };
+
     memory@80000000 {
         device_type = "memory";
-        reg = <0x80000000 0x4000000>; // 64MB of memory
+        reg = <0x80000000 0x8000000>; // 128MB of memory
     };
 
     cpus {
@@ -49,6 +63,16 @@
         #size-cells = <1>;
         compatible = "simple-bus";
         ranges;
+
+        framebuffer0: framebuffer@87e00000 {
+            compatible = "simple-framebuffer";
+            reg = <0x87e00000 0x12c000>;
+            width = <640>;
+            height = <480>;
+            stride = <2560>;
+            format = "x8r8g8b8";
+            status = "okay";
+        };
 
         plic0: interrupt-controller@c000000 {
             compatible = "sifive,plic-1.0.0", "riscv,plic0";
